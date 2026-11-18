@@ -9,7 +9,8 @@ Rules (applied in order; the first rule a parcel fails is recorded as its reason
      or business entity (LLC, INC, ...)
   4. property is not fully tax-exempt
   5. owner-occupied: normalized owner mailing street address == normalized site
-     address, and the mailing city is BANGOR
+     address and the mailing city is BANGOR, OR the parcel carries a homestead
+     exemption (owner's declared primary residence)
 
 Outputs:
   data/step3_targets.csv   parcels that pass (all raw columns + normalized addresses
@@ -128,12 +129,24 @@ def classify(r):
         return "fully tax-exempt", None
     site, mail = norm_street(r["PROP_LOC"]), norm_street(r["OWN_ADD1"])
     if mail.startswith("PO BOX") or mail.startswith("P O BOX"):
-        return "not owner-occupied: PO box mailing", None
-    if site != mail and not same_address_typo(site, mail):
-        return "not owner-occupied: mailing address differs", None
-    if mail_city(r["OWN_ADD2"]) != "BANGOR":
-        return "not owner-occupied: mailing city not Bangor", None
-    return None, kind
+        miss = "not owner-occupied: PO box mailing"
+    elif site != mail and not same_address_typo(site, mail):
+        miss = "not owner-occupied: mailing address differs"
+    elif mail_city(r["OWN_ADD2"]) != "BANGOR":
+        miss = "not owner-occupied: mailing city not Bangor"
+    else:
+        r["occupancy_basis"] = "address match"
+        return None, kind
+    # A homestead exemption means the owner declared this home their primary
+    # residence, so it counts as owner-occupied even when mail goes elsewhere.
+    if is_homestead(r):
+        r["occupancy_basis"] = "homestead exemption"
+        return None, kind
+    return miss, None
+
+
+def is_homestead(r):
+    return 25000 <= num(r["EXEMPTION"]) < num(r["VALUE_TOT"])
 
 
 def main():
@@ -144,7 +157,7 @@ def main():
         reason, kind = classify(r)
         r["site_norm"] = norm_street(r["PROP_LOC"])
         r["mail_norm"] = norm_street(r["OWN_ADD1"])
-        r["homestead_exempt"] = "Y" if num(r["EXEMPTION"]) >= 25000 and num(r["EXEMPTION"]) < num(r["VALUE_TOT"]) else ""
+        r["homestead_exempt"] = "Y" if is_homestead(r) else ""
         if reason:
             r["exclude_reason"] = reason
             drop.append(r)
@@ -153,9 +166,9 @@ def main():
             keep.append(r)
 
     base = list(rows[0].keys())
-    for path, data, extra in (("data/step3_targets.csv", keep, ["home_type"]),
+    for path, data, extra in (("data/step3_targets.csv", keep, ["home_type", "occupancy_basis"]),
                               ("data/step3_excluded.csv", drop, ["exclude_reason"])):
-        cols = [c for c in base if c not in ("home_type", "exclude_reason")] + extra
+        cols = [c for c in base if c not in ("home_type", "occupancy_basis", "exclude_reason")] + extra
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, cols, extrasaction="ignore")
             w.writeheader()
@@ -170,6 +183,7 @@ def main():
     for k, n in order.most_common():
         print(f"  {n:>6}  {k}")
     print(f"KEPT: {len(keep)}  ({Counter(r['home_type'] for r in keep)})")
+    print(f"  owner-occupied basis: {Counter(r['occupancy_basis'] for r in keep)}")
     print("wrote data/step3_targets.csv and data/step3_excluded.csv", file=sys.stderr)
 
 
