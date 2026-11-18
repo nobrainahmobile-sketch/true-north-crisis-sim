@@ -10,7 +10,7 @@ Inputs
                                 also works; a missing file = "no permit data")
 
 Scoring (max 12)
-  1. Estimated roof age (max 5)
+  1. Estimated roof age (max 5) - 0 if the record card shows a metal or slate roof
        with a roof permit on file: roof year = latest permit year
          age 25+ -> 5, 20-24 -> 4, 18-19 -> 3, under 18 -> 0
        no permit on file: roof year unknown, so use year built
@@ -40,7 +40,7 @@ OUT_COLS = [
     "account", "score", "priority", "why",
     "name_line1", "name_line2", "mail_address", "mail_city", "mail_state", "mail_zip",
     "property_address", "home_type",
-    "year_built", "roof_year_source", "condition", "owned_since", "year_remodeled",
+    "year_built", "roof_year_source", "roof_surface", "condition", "owned_since", "year_remodeled",
     "mail_flag",
 ]
 
@@ -96,7 +96,9 @@ def person_name(raw):
     'PAULETTE, ROBERT S & MARLENE M'  -> 'Robert S & Marlene M Paulette'
     anything else (trusts etc.)       -> title-cased as written
     """
-    raw = " ".join((raw or "").replace("  ", "|").split()).strip()
+    raw = re.sub(r"\s+\bJT\b\s*$", "", (raw or "").strip(), flags=re.I)  # joint tenant marker
+    raw = re.sub(r"\s*\bDTD\b\s*[\d/]+", "", raw, flags=re.I)              # trust dates
+    raw = " ".join(raw.replace("  ", "|").split()).strip()
     if not raw:
         return ""
     if re.search(r"TRUST|ESTATE|HEIRS|PER REP|\bDTD\b", raw, re.I):
@@ -115,7 +117,7 @@ def person_name(raw):
 
 def split_city(add2):
     m = re.match(r"\s*(.*?)\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*$", (add2 or "").upper())
-    return (m.group(1).title(), m.group(2), m.group(3)) if m else ((add2 or "").strip(), "", "")
+    return (m.group(1), m.group(2), m.group(3)) if m else ((add2 or "").strip(), "", "")
 
 
 # ---------- scoring ----------------------------------------------------------
@@ -124,6 +126,8 @@ def score(r, card, permits, median_bldg):
     built = to_int(r["RES_YR_BLT"])
 
     # 1. roof age
+    surface = (card or {}).get("roof_surface", "")
+    long_life = re.search(r"Metal|Slate", surface, re.I)
     permit_yr = permits.get(r["RE_ACCT"]) if permits else None
     if permit_yr:
         age = THIS_YEAR - permit_yr
@@ -141,6 +145,9 @@ def score(r, card, permits, median_bldg):
         else:
             p = 0
             why.append(f"built {built or '?'}: newer home" if built else "year built unknown")
+    if long_life and p:
+        p = 0
+        why.append(f"{surface.lower()} (40+ yr roof): no roof-age points")
     pts += p
 
     # 2. condition (record card)
@@ -153,6 +160,8 @@ def score(r, card, permits, median_bldg):
     # 3. years owned
     sale = r.get("SALE_DATE") or ""
     since = to_int(sale[:4]) if sale else 0
+    if since < 1900:  # city uses 1899-12-30 as a "no sale on record" placeholder
+        since = 0
     if since:
         owned = THIS_YEAR - since
         o = 2 if owned >= 15 else 1 if owned >= 10 else 0
@@ -213,10 +222,11 @@ def main():
             "priority": "A" if pts >= 8 else "B" if pts >= 5 else "C",
             "why": why,
             "name_line1": n1, "name_line2": "" if n2 == n1 else n2,
-            "mail_address": " ".join(r["OWN_ADD1"].split()),
+            "mail_address": " ".join(r["OWN_ADD1"].upper().split()),
             "mail_city": city, "mail_state": state, "mail_zip": zp,
             "property_address": r["PROP_LOC"], "home_type": r["home_type"],
             "year_built": r["RES_YR_BLT"], "roof_year_source": src,
+            "roof_surface": (cards.get(r["RE_ACCT"]) or {}).get("roof_surface", ""),
             "condition": cond or ("no card" if r["RE_ACCT"] not in cards else ""),
             "owned_since": since or "", "year_remodeled": rmd or "",
             "mail_flag": mail_flag(r),
