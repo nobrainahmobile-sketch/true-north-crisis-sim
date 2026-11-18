@@ -5,6 +5,7 @@ a lean mailing list.
 Inputs
   data/step3_targets.csv        owner-occupied single-family/duplex homes (step 3)
   data/tax_cards*.csv           parsed record cards (step 2b)      [optional]
+  data/public_permits.csv       city's public permits 2014-Jan 2020 (step 2c) [optional]
   data/roof_permits.csv         roof permits: account,permit_year  [optional]
                                 (a permit_date column in any common date format
                                 also works; a missing file = "no permit data")
@@ -19,6 +20,11 @@ Scoring (max 12)
          built 2009+     -> 0
        Note: when a permits file IS supplied, "no permit on file" is still scored
        by year built, as above.
+     Possible re-roof flag: if there is no roof permit but the city's public
+     permits show a "CONST EXIS" (work on an existing building) permit issued
+     after the home was built, roof-age points drop by 2 (not below 0) and the
+     home is flagged "possible re-roof <year> - verify". Those permits have no
+     work description, so most will be decks/windows/renovations, not roofs.
   2. Record-card building condition (max 3): Poor 3, Fair 2, Avg- 1
   3. Years owned, from last sale date (max 2): 15+ -> 2, 10-14 -> 1
   4. No remodel since 2008, homes built 2008 or earlier only (max 1)
@@ -37,7 +43,7 @@ import statistics
 THIS_YEAR = dt.date.today().year
 CONDITION_PTS = {"Poor": 3, "Fair": 2, "Avg-": 1, "Avg Minus": 1, "Below Avg": 1}
 OUT_COLS = [
-    "account", "score", "priority", "why",
+    "account", "score", "priority", "why", "possible_reroof",
     "name_line1", "name_line2", "mail_address", "mail_city", "mail_state", "mail_zip",
     "property_address", "home_type",
     "year_built", "roof_year_source", "roof_surface", "condition", "owned_since", "year_remodeled",
@@ -77,6 +83,19 @@ def load_permits(path):
                 yr = int(m.group(0)) if m else 0
             if acct != "0" and yr:
                 latest[acct] = max(latest.get(acct, 0), yr)
+    return latest
+
+
+def load_public_permits(path="data/public_permits.csv"):
+    """normalized address -> latest 'CONST EXIS' issue year (2014-2020 only)."""
+    if not os.path.exists(path):
+        return {}
+    latest = {}
+    with open(path, newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            yr = to_int(r["issuedate"][:4])
+            if r["permittype"] == "CONST EXIS" and yr and r["address_norm"]:
+                latest[r["address_norm"]] = max(latest.get(r["address_norm"], 0), yr)
     return latest
 
 
@@ -121,7 +140,7 @@ def split_city(add2):
 
 
 # ---------- scoring ----------------------------------------------------------
-def score(r, card, permits, median_bldg):
+def score(r, card, permits, median_bldg, public_permits):
     pts, why = 0, []
     built = to_int(r["RES_YR_BLT"])
 
@@ -138,13 +157,19 @@ def score(r, card, permits, median_bldg):
         src = "year built (no permit data)" if permits is None else "year built (no permit on file)"
         if 2001 <= built <= 2008:
             p = 4
-            why.append(f"built {built}: original roof ~{THIS_YEAR - built} yrs")
+            why.append(f"built {built}: likely original roof ~{THIS_YEAR - built} yrs")
         elif 0 < built <= 2000:
             p = 2
             why.append(f"built {built}: roof age unknown")
         else:
             p = 0
             why.append(f"built {built or '?'}: newer home" if built else "year built unknown")
+    reroof = ""
+    pub_yr = public_permits.get(r.get("site_norm", ""))
+    if not permit_yr and pub_yr and pub_yr > built and p:
+        reroof = str(pub_yr)
+        p = max(p - 2, 0)
+        why.append(f"possible re-roof {pub_yr} (existing-bldg permit) - verify")
     if long_life and p:
         p = 0
         why.append(f"{surface.lower()} (40+ yr roof): no roof-age points")
@@ -181,7 +206,7 @@ def score(r, card, permits, median_bldg):
     if to_int(r["VALUE_BLDG"]) > median_bldg:
         pts += 1
 
-    return pts, "; ".join(why), src, cond, since, rmd
+    return pts, "; ".join(why), src, cond, since, rmd, reroof
 
 
 def mail_flag(r):
@@ -212,16 +237,18 @@ def main():
 
     cards = load_cards()
     permits = load_permits(a.permits)
+    public_permits = load_public_permits()
 
     out = []
     for r in targets:
-        pts, why, src, cond, since, rmd = score(r, cards.get(r["RE_ACCT"]), permits, median_bldg)
+        pts, why, src, cond, since, rmd, reroof = score(
+            r, cards.get(r["RE_ACCT"]), permits, median_bldg, public_permits)
         city, state, zp = split_city(r["OWN_ADD2"])
         n1, n2 = person_name(r["OWNER"]), person_name(r["OWNER2"])
         out.append({
             "account": r["RE_ACCT"], "score": pts,
             "priority": "A" if pts >= 8 else "B" if pts >= 5 else "C",
-            "why": why,
+            "why": why, "possible_reroof": reroof,
             "name_line1": n1, "name_line2": "" if n2 == n1 else n2,
             "mail_address": " ".join(r["OWN_ADD1"].upper().split()),
             "mail_city": city, "mail_state": state, "mail_zip": zp,
