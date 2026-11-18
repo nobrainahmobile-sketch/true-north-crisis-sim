@@ -21,7 +21,7 @@ Scoring (max 12)
        by year built, as above.
   2. Record-card building condition (max 3): Poor 3, Fair 2, Avg- 1
   3. Years owned, from last sale date (max 2): 15+ -> 2, 10-14 -> 1
-  4. No remodel since 2008 (max 1)
+  4. No remodel since 2008, homes built 2008 or earlier only (max 1)
   5. Building value above the target list's median (max 1)
 
 Output: data/mailing_list.csv (or -o), sorted by score, highest first.
@@ -172,7 +172,8 @@ def score(r, card, permits, median_bldg):
     # 4. no remodel since 2008
     rmd = to_int(r["RES_YR_RMD"])
     if rmd < 2008:
-        pts += 1
+        if 0 < built <= 2008:  # only meaningful for homes old enough to need a roof
+            pts += 1
     else:
         why.append(f"remodeled {rmd}")
 
